@@ -91,6 +91,31 @@ app.get("/places", async (req, res) => {
   }
 });
 
+function normalize(str) {
+  return str
+    .toLowerCase()
+    .replace(/ı/g, "i")
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c");
+}
+
+app.get("/places/search", async (req, res) => {
+  const q = normalize(req.query.query || "");
+
+  const snap = await db.collection("places").get();
+
+  const results = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .filter(
+      (p) => normalize(p.name).includes(q) || normalize(p.city).includes(q)
+    );
+
+  res.json({ places: results });
+});
+
 app.get("/places/new", async (req, res) => {
   try {
     const snap = await db
