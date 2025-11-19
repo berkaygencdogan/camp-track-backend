@@ -19,7 +19,6 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-console.log("API KEY:", process.env.FIREBASE_API_KEY);
 
 // --------------------------------------------------
 // JWT MIDDLEWARE
@@ -165,7 +164,6 @@ app.get("/places/:id", authOptional, async (req, res) => {
 app.post("/register", async (req, res) => {
   try {
     const { name, email, phone, password } = req.body;
-    console.log(name, email, phone, password);
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
@@ -185,7 +183,6 @@ app.post("/register", async (req, res) => {
       password,
       displayName: name,
     });
-    console.log("Created UID", cred.uid);
 
     // Firestore kayıt
     await db
@@ -237,7 +234,6 @@ app.post("/login", async (req, res) => {
     });
 
     const data = await r.json();
-    console.log("LOGIN RESPONSE:", data);
 
     if (data.error) {
       return res.status(400).json({ error: "INVALID_CREDENTIALS" });
@@ -355,6 +351,70 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: "AUTH_FAILED" });
+  }
+});
+
+// --------------------------------------------------------
+// FAVORİ EKLE
+// --------------------------------------------------------
+app.post("/favorites/add", async (req, res) => {
+  try {
+    const { userId, placeId } = req.body;
+
+    const placeRef = db.collection("places").doc(placeId);
+
+    await placeRef.update({
+      favoritedBy: admin.firestore.FieldValue.arrayUnion(userId),
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("FAVORITE ADD ERROR:", err);
+    return res.status(500).json({ error: "FAVORITE_ADD_FAILED" });
+  }
+});
+
+// --------------------------------------------------------
+// FAVORİ ÇIKAR
+// --------------------------------------------------------
+app.post("/favorites/remove", async (req, res) => {
+  try {
+    const { userId, placeId } = req.body;
+
+    const placeRef = db.collection("places").doc(placeId);
+
+    await placeRef.update({
+      favoritedBy: admin.firestore.FieldValue.arrayRemove(userId),
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("FAVORITE REMOVE ERROR:", err);
+    return res.status(500).json({ error: "FAVORITE_REMOVE_FAILED" });
+  }
+});
+
+// --------------------------------------------------------
+// GET USER FAVORITES
+// --------------------------------------------------------
+app.get("/favorites/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const snapshot = await db
+      .collection("places")
+      .where("favoritedBy", "array-contains", userId)
+      .get();
+
+    const favorites = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    return res.json({ favorites });
+  } catch (err) {
+    console.log("FAVORITE LIST ERROR:", err);
+    res.status(500).json({ error: "FAVORITE_LIST_FAILED" });
   }
 });
 
