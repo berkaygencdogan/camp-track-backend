@@ -20,21 +20,6 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
-// --------------------------------------------------
-// JWT MIDDLEWARE
-// --------------------------------------------------
-function auth(req, res, next) {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "NO_TOKEN" });
-
-  try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
-    next();
-  } catch (e) {
-    res.status(401).json({ error: "INVALID_TOKEN" });
-  }
-}
-
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: "NO_TOKEN" });
@@ -102,7 +87,210 @@ function normalize(str) {
     .replace(/ç/g, "c");
 }
 
-app.get("/users/search", authMiddleware, async (req, res) => {
+app.post("/teams/create", async (req, res) => {
+  try {
+    const { userId, name } = req.body;
+    console.log(userId, name);
+    if (!userId || !name) {
+      return res.status(400).json({ error: "Missing userId or name" });
+    }
+
+    const teamRef = await db.collection("teams").add({
+      name,
+      ownerId: userId,
+      createdAt: Date.now(),
+      members: [userId],
+    });
+
+    return res.json({
+      success: true,
+      teamId: teamRef.id,
+      name,
+    });
+  } catch (err) {
+    console.log("TEAM_CREATE_ERROR:", err);
+    return res.status(500).json({ error: "TEAM_CREATE_FAILED" });
+  }
+});
+
+// 3) USER INVITE (add member)
+app.post("/teams/invite", async (req, res) => {
+  try {
+    const { teamId, userId } = req.body;
+
+    if (!teamId || !userId) {
+      return res.status(400).json({ error: "MISSING_PARAMS" });
+    }
+
+    const teamRef = db.collection("teams").doc(teamId);
+    const snap = await teamRef.get();
+
+    if (!snap.exists) {
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+    }
+
+    const team = snap.data();
+
+    // Zaten üyeyse tekrar ekleme
+    if (team.members.includes(userId)) {
+      return res.json({ success: true, message: "ALREADY_MEMBER" });
+    }
+
+    await teamRef.update({
+      members: admin.firestore.FieldValue.arrayUnion(userId),
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("INVITE_ERROR:", err);
+    return res.status(500).json({ error: "INVITE_FAILED" });
+  }
+});
+
+// 3) Kullanıcının tüm takımlarını listele
+app.get("/teams/my", async (req, res) => {
+  try {
+    const userId = req.query.userId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "MISSING_USER_ID" });
+    }
+
+    const snap = await db
+      .collection("teams")
+      .where("members", "array-contains", userId)
+      .get();
+
+    const teams = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+    return res.json({ teams });
+  } catch (err) {
+    console.log("TEAMS_MY_ERROR:", err);
+    res.status(500).json({ error: "TEAMS_MY_FAILED" });
+  }
+});
+
+app.get("/teams/:teamId", async (req, res) => {
+  console.log("girdi");
+  try {
+    const { teamId } = req.params;
+
+    const snap = await db.collection("teams").doc(teamId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+    }
+
+    const team = { id: teamId, ...snap.data() };
+
+    return res.json({ team });
+  } catch (err) {
+    console.log("TEAM_DETAIL_ERROR:", err);
+    res.status(500).json({ error: "TEAM_DETAIL_FAILED" });
+  }
+});
+
+// TEAM MEMBERS – PUBLIC (token yok)
+app.get("/teams/:teamId/members", async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    const snap = await db.collection("teams").doc(teamId).get();
+    if (!snap.exists) return res.json({ members: [] });
+
+    const team = snap.data();
+    const memberIds = team.members || [];
+
+    const members = [];
+
+    for (let id of memberIds) {
+      const userSnap = await db.collection("users").doc(id).get();
+      if (userSnap.exists) {
+        members.push({ id, ...userSnap.data() });
+      }
+    }
+
+    return res.json({ members });
+  } catch (err) {
+    console.log("TEAM_MEMBERS_ERROR:", err);
+    res.status(500).json({ error: "TEAM_MEMBERS_FAILED" });
+  }
+});
+
+// ADD MEMBER – Only owner can add (token yok → body üzerinden ownerId)
+app.post("/teams/addMember", async (req, res) => {
+  try {
+    const { teamId, userId, ownerId } = req.body;
+
+    if (!teamId || !userId || !ownerId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // Team getir
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+
+    // 🔥 SADECE takım sahibi ekleme yapabilir
+    if (team.ownerId !== ownerId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
+
+    // Mevcut üyeler
+    const members = team.members || [];
+
+    // Zaten ekli mi?
+    if (!members.includes(userId)) {
+      members.push(userId);
+    }
+
+    // Firestore'a yaz
+    await db.collection("teams").doc(teamId).update({
+      members: members,
+    });
+
+    // Kullanıcıya da ekle
+    await db
+      .collection("userTeams")
+      .doc(userId)
+      .set({ [teamId]: true }, { merge: true });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("ADD_MEMBER_ERROR:", err);
+    res.status(500).json({ error: "ADD_MEMBER_FAILED" });
+  }
+});
+
+// ---------------------------------------------------------
+// TAKIM ADINI DEĞİŞTİRME (YALNIZCA TAKIM SAHİBİ)
+// ---------------------------------------------------------
+app.post("/teams/rename", async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { teamId, newName } = req.body;
+
+    const snap = await db.collection("teams").doc(teamId).get();
+    if (!snap.exists) return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = snap.data();
+
+    // Yalnızca sahibi değiştirebilir
+    if (team.ownerId !== userId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
+
+    await db.collection("teams").doc(teamId).update({
+      name: newName,
+    });
+
+    return res.json({ success: true, newName });
+  } catch (err) {
+    console.log("TEAM_RENAME_ERROR:", err);
+    res.status(500).json({ error: "TEAM_RENAME_FAILED" });
+  }
+});
+
+app.get("/users/search", async (req, res) => {
   try {
     const query = req.query.q?.toLowerCase() || "";
 
@@ -117,63 +305,6 @@ app.get("/users/search", authMiddleware, async (req, res) => {
     console.log(err);
     return res.status(500).json({ error: "SEARCH_FAILED" });
   }
-});
-
-app.get("/teammates", authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.uid;
-
-    // 1) Kullanıcının team name’ini al
-    const snap = await db.collection("teamNames").doc(userId).get();
-    const teamName = snap.exists ? snap.data().name : "Teammates";
-
-    // 2) Kullanıcının teammates listesini çek
-    const teamSnap = await db.collection("teammates").doc(userId).get();
-    const teamData = teamSnap.exists ? teamSnap.data() : {};
-
-    const teammates = Object.values(teamData);
-
-    // 3) Kullanıcının profil bilgisi
-    const userSnap = await db.collection("users").doc(userId).get();
-    const you = userSnap.exists ? { id: userId, ...userSnap.data() } : null;
-
-    return res.json({
-      teamName,
-      teammates,
-      you,
-    });
-  } catch (err) {
-    console.log("TEAMS ERROR:", err);
-    return res.status(500).json({ error: "TEAM_FETCH_FAILED" });
-  }
-});
-
-app.post("/teammates/add", authMiddleware, async (req, res) => {
-  try {
-    const userId = req.user.uid;
-    const { teammateId } = req.body;
-
-    if (!teammateId)
-      return res.status(400).json({ error: "Missing teammateId" });
-
-    await db
-      .collection("teams")
-      .doc(userId)
-      .set({ [teammateId]: true }, { merge: true });
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log(err);
-    return res.status(500).json({ error: "ADD_TEAMMATE_FAILED" });
-  }
-});
-
-app.post("/teammates/teamname", authMiddleware, async (req, res) => {
-  const { name } = req.body;
-  const userId = req.user.uid;
-
-  await db.collection("teamNames").doc(userId).set({ name });
-  return res.json({ success: true });
 });
 
 app.get("/places/search", async (req, res) => {
@@ -515,6 +646,13 @@ app.get("/favorites/:userId", async (req, res) => {
     console.log("FAVORITE LIST ERROR:", err);
     res.status(500).json({ error: "FAVORITE_LIST_FAILED" });
   }
+});
+
+app.get("/debug/teams", async (req, res) => {
+  const snap = await db.collection("teams").get();
+  const list = [];
+  snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() }));
+  return res.json(list);
 });
 
 // --------------------------------------------------
