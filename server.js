@@ -90,7 +90,6 @@ function normalize(str) {
 app.post("/teams/create", async (req, res) => {
   try {
     const { userId, name } = req.body;
-    console.log(userId, name);
     if (!userId || !name) {
       return res.status(400).json({ error: "Missing userId or name" });
     }
@@ -171,7 +170,6 @@ app.get("/teams/my/:userId", async (req, res) => {
 });
 
 app.get("/teams/:teamId", async (req, res) => {
-  console.log("girdi");
   try {
     const { teamId } = req.params;
 
@@ -292,18 +290,26 @@ app.post("/teams/rename", async (req, res) => {
 
 app.get("/users/search", async (req, res) => {
   try {
-    const query = req.query.q?.toLowerCase() || "";
+    const { username } = req.query;
 
-    const snap = await db.collection("users_public").get();
+    if (!username || username.length < 3) {
+      return res.json({ users: [] }); // minimum 3 harf
+    }
 
-    const results = snap.docs
-      .map((d) => d.data())
-      .filter((u) => u.name.toLowerCase().includes(query));
+    const low = username.toLowerCase();
 
-    return res.json({ users: results });
+    const snap = await db
+      .collection("users")
+      .where("searchKeywords", "array-contains", low)
+      .get();
+
+    const users = [];
+    snap.forEach((doc) => users.push({ id: doc.id, ...doc.data() }));
+
+    return res.json({ users });
   } catch (err) {
-    console.log(err);
-    return res.status(500).json({ error: "SEARCH_FAILED" });
+    console.log("SEARCH_USERS_ERROR:", err);
+    res.status(500).json({ error: "SEARCH_FAILED" });
   }
 });
 
@@ -393,17 +399,31 @@ app.get("/places/:id", authOptional, async (req, res) => {
 
 app.post("/register", async (req, res) => {
   try {
-    const { name, email, phone, password } = req.body;
+    let { name, email, phone, password } = req.body;
     if (!name || !email || !phone || !password) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
 
-    // Email zaten var mı?
-    const exists = await db
+    // nickname orijinal kalır → sadece arama için lowercase çıkarılır
+    const keywords = name.toLowerCase();
+
+    // Nickname var mı? (case-insensitive kontrol)
+    const nickCheck = await db
+      .collection("users")
+      .where("keywords", "==", keywords)
+      .get();
+
+    if (!nickCheck.empty) {
+      return res.status(400).json({ error: "NICKNAME_EXISTS" });
+    }
+
+    // Email var mı?
+    const emailCheck = await db
       .collection("users")
       .where("email", "==", email)
       .get();
-    if (!exists.empty) {
+
+    if (!emailCheck.empty) {
       return res.status(400).json({ error: "EMAIL_EXISTS" });
     }
 
@@ -420,7 +440,8 @@ app.post("/register", async (req, res) => {
       .doc(cred.uid)
       .set({
         id: cred.uid,
-        name,
+        name, // orijinal isim
+        keywords, // küçük harfli arama
         email,
         phone,
         image: `https://ui-avatars.com/api/?name=${name}`,
