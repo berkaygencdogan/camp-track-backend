@@ -102,6 +102,80 @@ function normalize(str) {
     .replace(/ç/g, "c");
 }
 
+app.get("/users/search", authMiddleware, async (req, res) => {
+  try {
+    const query = req.query.q?.toLowerCase() || "";
+
+    const snap = await db.collection("users_public").get();
+
+    const results = snap.docs
+      .map((d) => d.data())
+      .filter((u) => u.name.toLowerCase().includes(query));
+
+    return res.json({ users: results });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ error: "SEARCH_FAILED" });
+  }
+});
+
+app.get("/teammates", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+
+    // 1) Kullanıcının team name’ini al
+    const snap = await db.collection("teamNames").doc(userId).get();
+    const teamName = snap.exists ? snap.data().name : "Teammates";
+
+    // 2) Kullanıcının teammates listesini çek
+    const teamSnap = await db.collection("teammates").doc(userId).get();
+    const teamData = teamSnap.exists ? teamSnap.data() : {};
+
+    const teammates = Object.values(teamData);
+
+    // 3) Kullanıcının profil bilgisi
+    const userSnap = await db.collection("users").doc(userId).get();
+    const you = userSnap.exists ? { id: userId, ...userSnap.data() } : null;
+
+    return res.json({
+      teamName,
+      teammates,
+      you,
+    });
+  } catch (err) {
+    console.log("TEAMS ERROR:", err);
+    return res.status(500).json({ error: "TEAM_FETCH_FAILED" });
+  }
+});
+
+app.post("/teammates/add", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { teammateId } = req.body;
+
+    if (!teammateId)
+      return res.status(400).json({ error: "Missing teammateId" });
+
+    await db
+      .collection("teams")
+      .doc(userId)
+      .set({ [teammateId]: true }, { merge: true });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log(err);
+    return res.status(500).json({ error: "ADD_TEAMMATE_FAILED" });
+  }
+});
+
+app.post("/teammates/teamname", authMiddleware, async (req, res) => {
+  const { name } = req.body;
+  const userId = req.user.uid;
+
+  await db.collection("teamNames").doc(userId).set({ name });
+  return res.json({ success: true });
+});
+
 app.get("/places/search", async (req, res) => {
   const q = normalize(req.query.query || "");
 
