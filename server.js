@@ -148,25 +148,25 @@ app.post("/teams/invite", async (req, res) => {
 });
 
 // 3) Kullanıcının tüm takımlarını listele
-app.get("/teams/my", async (req, res) => {
+app.get("/teams/my/:userId", async (req, res) => {
   try {
-    const userId = req.query.userId;
+    const { userId } = req.params;
+    if (!userId) return res.status(400).json({ error: "MISSING_USER_ID" });
 
-    if (!userId) {
-      return res.status(400).json({ error: "MISSING_USER_ID" });
-    }
+    const snap = await db.collection("teams").get();
 
-    const snap = await db
-      .collection("teams")
-      .where("members", "array-contains", userId)
-      .get();
+    const myTeams = [];
+    snap.forEach((doc) => {
+      const data = doc.data();
+      if (data.members?.includes(userId)) {
+        myTeams.push({ id: doc.id, ...data });
+      }
+    });
 
-    const teams = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-
-    return res.json({ teams });
+    return res.json({ teams: myTeams });
   } catch (err) {
     console.log("TEAMS_MY_ERROR:", err);
-    res.status(500).json({ error: "TEAMS_MY_FAILED" });
+    return res.status(500).json({ error: "TEAMS_MY_FAILED" });
   }
 });
 
