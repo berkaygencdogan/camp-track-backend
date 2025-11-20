@@ -87,6 +87,15 @@ function normalize(str) {
     .replace(/ç/g, "c");
 }
 
+const generateKeywords = (name) => {
+  const low = name.toLowerCase();
+  const keys = [];
+  for (let i = 1; i <= low.length; i++) {
+    keys.push(low.substring(0, i));
+  }
+  return keys;
+};
+
 app.post("/teams/create", async (req, res) => {
   try {
     const { userId, name } = req.body;
@@ -115,34 +124,92 @@ app.post("/teams/create", async (req, res) => {
 // 3) USER INVITE (add member)
 app.post("/teams/invite", async (req, res) => {
   try {
-    const { teamId, userId } = req.body;
+    const { teamId, fromId, toId } = req.body;
 
-    if (!teamId || !userId) {
-      return res.status(400).json({ error: "MISSING_PARAMS" });
+    if (!teamId || !fromId || !toId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
     }
 
-    const teamRef = db.collection("teams").doc(teamId);
-    const snap = await teamRef.get();
-
-    if (!snap.exists) {
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    if (!teamSnap.exists)
       return res.status(404).json({ error: "TEAM_NOT_FOUND" });
-    }
 
-    const team = snap.data();
+    const team = teamSnap.data();
 
-    // Zaten üyeyse tekrar ekleme
-    if (team.members.includes(userId)) {
-      return res.json({ success: true, message: "ALREADY_MEMBER" });
-    }
+    if (team.ownerId !== fromId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
 
-    await teamRef.update({
-      members: admin.firestore.FieldValue.arrayUnion(userId),
+    const fromUser = await db.collection("users").doc(fromId).get();
+    const toUser = await db.collection("users").doc(toId).get();
+
+    const requestId = Date.now().toString();
+
+    await db.collection("teamRequests").doc(requestId).set({
+      id: requestId,
+      teamId,
+      teamName: team.name,
+      fromId,
+      fromName: fromUser.data().name,
+      toId,
+      toName: toUser.data().name,
+      createdAt: Date.now(),
     });
+
+    return res.json({ success: true, requestId });
+  } catch (err) {
+    console.log("INVITE_ERROR:", err);
+    res.status(500).json({ error: "INVITE_FAILED" });
+  }
+});
+
+app.get("/teams/requests/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const snap = await db
+      .collection("teamRequests")
+      .where("toId", "==", userId)
+      .get();
+
+    const list = [];
+    snap.forEach((d) => list.push(d.data()));
+
+    return res.json({ requests: list });
+  } catch (err) {
+    console.log("REQUEST_LIST_ERROR:", err);
+    res.status(500).json({ error: "REQUEST_LIST_FAILED" });
+  }
+});
+
+app.post("/teams/requests/accept", async (req, res) => {
+  try {
+    const { requestId, teamId, userId } = req.body;
+
+    if (!requestId || !teamId || !userId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // 1) Takıma kullanıcı ekle
+    await db
+      .collection("teams")
+      .doc(teamId)
+      .update({
+        members: admin.firestore.FieldValue.arrayUnion(userId),
+      });
+
+    // 2) Kullanıcının myTeams listesine ekle
+    await db
+      .collection("userTeams")
+      .doc(userId)
+      .set({ [teamId]: true }, { merge: true });
+
+    // 3) Request’i sil
+    await db.collection("teamRequests").doc(requestId).delete();
 
     return res.json({ success: true });
   } catch (err) {
-    console.log("INVITE_ERROR:", err);
-    return res.status(500).json({ error: "INVITE_FAILED" });
+    console.log("REQUEST_ACCEPT_ERROR:", err);
+    res.status(500).json({ error: "ACCEPT_FAILED" });
   }
 });
 
@@ -289,18 +356,19 @@ app.post("/teams/rename", async (req, res) => {
 });
 
 app.get("/users/search", async (req, res) => {
+  console.log("girdi");
   try {
     const { username } = req.query;
 
     if (!username || username.length < 3) {
-      return res.json({ users: [] }); // minimum 3 harf
+      return res.json({ users: [] });
     }
 
     const low = username.toLowerCase();
 
     const snap = await db
       .collection("users")
-      .where("searchKeywords", "array-contains", low)
+      .where("keywords", "array-contains", low)
       .get();
 
     const users = [];
@@ -441,7 +509,7 @@ app.post("/register", async (req, res) => {
       .set({
         id: cred.uid,
         name, // orijinal isim
-        keywords, // küçük harfli arama
+        keywords: generateKeywords(name), // küçük harfli arama
         email,
         phone,
         image: `https://ui-avatars.com/api/?name=${name}`,
@@ -669,11 +737,114 @@ app.get("/favorites/:userId", async (req, res) => {
   }
 });
 
-app.get("/debug/teams", async (req, res) => {
-  const snap = await db.collection("teams").get();
-  const list = [];
-  snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() }));
-  return res.json(list);
+// 📌 Bir kullanıcıya davet gönder
+app.post("/notifications/send", async (req, res) => {
+  try {
+    const { fromUserId, toUserId, teamId, teamName } = req.body;
+
+    if (!fromUserId || !toUserId || !teamId || !teamName) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // Firestore → notifications / toUserId / autoId
+    const doc = await db
+      .collection("notifications")
+      .doc(toUserId)
+      .collection("items")
+      .add({
+        fromUserId,
+        toUserId,
+        teamId,
+        teamName,
+        status: "pending",
+        createdAt: Date.now(),
+      });
+
+    return res.json({ success: true, id: doc.id });
+  } catch (err) {
+    console.log("NOTIFICATION_SEND_ERROR:", err);
+    res.status(500).json({ error: "NOTIFICATION_SEND_FAILED" });
+  }
+});
+
+// 📌 Bildirimleri listele
+app.get("/notifications/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const snap = await db
+      .collection("notifications")
+      .doc(userId)
+      .collection("items")
+      .orderBy("createdAt", "desc")
+      .get();
+
+    const notifications = [];
+    snap.forEach((doc) => notifications.push({ id: doc.id, ...doc.data() }));
+
+    return res.json({ notifications });
+  } catch (err) {
+    console.log("NOTIFICATION_LIST_ERROR:", err);
+    res.status(500).json({ error: "NOTIFICATION_LIST_FAILED" });
+  }
+});
+
+// 📌 Daveti kabul et → kullanıcıyı takıma ekle
+app.post("/notifications/accept", async (req, res) => {
+  try {
+    const { notificationId, userId, teamId } = req.body;
+
+    if (!notificationId || !userId || !teamId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // 🔹 1) Kullanıcıyı teamMembers'a ekle
+    await db
+      .collection("teamMembers")
+      .doc(teamId)
+      .set({ [userId]: true }, { merge: true });
+
+    // 🔹 2) userTeams listesine ekle
+    await db
+      .collection("userTeams")
+      .doc(userId)
+      .set({ [teamId]: true }, { merge: true });
+
+    // 🔹 3) Bildirimi sil
+    await db
+      .collection("notifications")
+      .doc(userId)
+      .collection("items")
+      .doc(notificationId)
+      .delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("NOTIFICATION_ACCEPT_ERROR:", err);
+    res.status(500).json({ error: "NOTIFICATION_ACCEPT_FAILED" });
+  }
+});
+
+app.post("/notifications/reject", async (req, res) => {
+  try {
+    const { notificationId, userId } = req.body;
+
+    if (!notificationId || !userId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    await db
+      .collection("notifications")
+      .doc(userId)
+      .collection("items")
+      .doc(notificationId)
+      .delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("NOTIFICATION_REJECT_ERROR:", err);
+    res.status(500).json({ error: "NOTIFICATION_REJECT_FAILED" });
+  }
 });
 
 // --------------------------------------------------
