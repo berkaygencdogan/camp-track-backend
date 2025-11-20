@@ -162,22 +162,42 @@ app.post("/teams/invite", async (req, res) => {
   }
 });
 
-app.get("/teams/requests/:userId", async (req, res) => {
+app.get("/teams/requests", async (req, res) => {
   try {
-    const { userId } = req.params;
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "MISSING_USER_ID" });
 
     const snap = await db
       .collection("teamRequests")
       .where("toId", "==", userId)
       .get();
 
-    const list = [];
-    snap.forEach((d) => list.push(d.data()));
+    const requests = [];
+    snap.forEach((doc) => requests.push(doc.data()));
 
-    return res.json({ requests: list });
+    return res.json({ requests });
   } catch (err) {
     console.log("REQUEST_LIST_ERROR:", err);
-    res.status(500).json({ error: "REQUEST_LIST_FAILED" });
+    return res.status(500).json({ error: "REQUEST_LIST_FAILED" });
+  }
+});
+
+app.post("/teams/request/reject", async (req, res) => {
+  try {
+    const { requestId } = req.body;
+    if (!requestId)
+      return res.status(400).json({ error: "MISSING_REQUEST_ID" });
+
+    const reqSnap = await db.collection("teamRequests").doc(requestId).get();
+    if (!reqSnap.exists)
+      return res.status(404).json({ error: "REQUEST_NOT_FOUND" });
+
+    await db.collection("teamRequests").doc(requestId).delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("REQUEST_REJECT_ERROR:", err);
+    return res.status(500).json({ error: "REQUEST_REJECT_FAILED" });
   }
 });
 
@@ -742,27 +762,26 @@ app.post("/notifications/send", async (req, res) => {
   try {
     const { fromUserId, toUserId, teamId, teamName } = req.body;
 
-    if (!fromUserId || !toUserId || !teamId || !teamName) {
+    if (!fromUserId || !toUserId || !teamId) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
 
-    // Firestore → notifications / toUserId / autoId
-    const doc = await db
-      .collection("notifications")
-      .doc(toUserId)
-      .collection("items")
-      .add({
-        fromUserId,
-        toUserId,
-        teamId,
-        teamName,
-        status: "pending",
-        createdAt: Date.now(),
-      });
+    const notifId = Date.now().toString();
 
-    return res.json({ success: true, id: doc.id });
+    await db.collection("notifications").doc(notifId).set({
+      id: notifId,
+      fromUserId,
+      toUserId,
+      teamId,
+      teamName,
+      type: "team_invite",
+      createdAt: Date.now(),
+      seen: false,
+    });
+
+    return res.json({ success: true, notifId });
   } catch (err) {
-    console.log("NOTIFICATION_SEND_ERROR:", err);
+    console.log("NOTIFICATIONS_SEND_ERROR:", err);
     res.status(500).json({ error: "NOTIFICATION_SEND_FAILED" });
   }
 });
@@ -774,49 +793,54 @@ app.get("/notifications/:userId", async (req, res) => {
 
     const snap = await db
       .collection("notifications")
-      .doc(userId)
-      .collection("items")
+      .where("toUserId", "==", userId)
       .orderBy("createdAt", "desc")
       .get();
 
-    const notifications = [];
-    snap.forEach((doc) => notifications.push({ id: doc.id, ...doc.data() }));
+    const list = [];
+    snap.forEach((d) => list.push(d.data()));
 
-    return res.json({ notifications });
+    return res.json({ notifications: list });
   } catch (err) {
-    console.log("NOTIFICATION_LIST_ERROR:", err);
-    res.status(500).json({ error: "NOTIFICATION_LIST_FAILED" });
+    console.log("NOTIFICATIONS_GET_ERROR:", err);
+    res.status(500).json({ error: "NOTIFICATIONS_FETCH_FAILED" });
   }
 });
 
 // 📌 Daveti kabul et → kullanıcıyı takıma ekle
 app.post("/notifications/accept", async (req, res) => {
   try {
-    const { notificationId, userId, teamId } = req.body;
+    const { notifId, userId } = req.body;
 
-    if (!notificationId || !userId || !teamId) {
+    if (!notifId || !userId)
       return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
 
-    // 🔹 1) Kullanıcıyı teamMembers'a ekle
-    await db
-      .collection("teamMembers")
-      .doc(teamId)
-      .set({ [userId]: true }, { merge: true });
+    const notifSnap = await db.collection("notifications").doc(notifId).get();
+    if (!notifSnap.exists)
+      return res.status(404).json({ error: "NOTIFICATION_NOT_FOUND" });
 
-    // 🔹 2) userTeams listesine ekle
+    const notif = notifSnap.data();
+
+    // Takıma ekle
+    const teamSnap = await db.collection("teams").doc(notif.teamId).get();
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+    const members = team.members || [];
+
+    if (!members.includes(userId)) members.push(userId);
+
+    await db.collection("teams").doc(notif.teamId).update({ members });
+
+    // userTeams güncelle
     await db
       .collection("userTeams")
       .doc(userId)
-      .set({ [teamId]: true }, { merge: true });
+      .set({ [notif.teamId]: true }, { merge: true });
 
-    // 🔹 3) Bildirimi sil
-    await db
-      .collection("notifications")
-      .doc(userId)
-      .collection("items")
-      .doc(notificationId)
-      .delete();
+    // Bildirimi sil
+    await db.collection("notifications").doc(notifId).delete();
 
     return res.json({ success: true });
   } catch (err) {
@@ -827,18 +851,11 @@ app.post("/notifications/accept", async (req, res) => {
 
 app.post("/notifications/reject", async (req, res) => {
   try {
-    const { notificationId, userId } = req.body;
+    const { notifId } = req.body;
 
-    if (!notificationId || !userId) {
-      return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
+    if (!notifId) return res.status(400).json({ error: "MISSING_FIELDS" });
 
-    await db
-      .collection("notifications")
-      .doc(userId)
-      .collection("items")
-      .doc(notificationId)
-      .delete();
+    await db.collection("notifications").doc(notifId).delete();
 
     return res.json({ success: true });
   } catch (err) {
