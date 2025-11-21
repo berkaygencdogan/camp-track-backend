@@ -259,7 +259,7 @@ app.get("/teams/my/:userId", async (req, res) => {
 app.get("/teams/:teamId", async (req, res) => {
   try {
     const { teamId } = req.params;
-
+    console.log("/teams/:teamId", teamId);
     const snap = await db.collection("teams").doc(teamId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "TEAM_NOT_FOUND" });
@@ -375,8 +375,51 @@ app.post("/teams/rename", async (req, res) => {
   }
 });
 
+app.get("/teams/:teamId/members", async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+    const members = team.members || [];
+
+    const userList = [];
+    for (let uid of members) {
+      const userSnap = await db.collection("users").doc(uid).get();
+      if (userSnap.exists) {
+        userList.push({ id: uid, ...userSnap.data() });
+      }
+    }
+
+    return res.json({ members: userList });
+  } catch (err) {
+    console.log("TEAM_MEMBERS_ERROR:", err);
+    res.status(500).json({ error: "TEAM_MEMBERS_FAILED" });
+  }
+});
+
+app.post("/users/setOnline", async (req, res) => {
+  try {
+    const { userId, isOnline } = req.body;
+
+    if (!userId) return res.status(400).json({ error: "NO_USER_ID" });
+
+    await db.collection("users").doc(userId).update({
+      isOnline,
+      lastSeen: Date.now(),
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("ONLINE_UPDATE_ERROR:", err);
+    res.status(500).json({ error: "ONLINE_UPDATE_FAILED" });
+  }
+});
+
 app.get("/users/search", async (req, res) => {
-  console.log("girdi");
   try {
     const { username } = req.query;
 
@@ -595,10 +638,11 @@ app.post("/login", async (req, res) => {
   }
 });
 
-app.post("/favorites/add", authMiddleware, async (req, res) => {
+app.post("/favorites/add", async (req, res) => {
   try {
-    const { placeId } = req.body;
-    const userId = req.user.uid;
+    const { userId, placeId } = req.body;
+
+    console.log(userId, placeId);
 
     if (!placeId) {
       return res.status(400).json({ error: "Missing placeId" });
@@ -616,10 +660,9 @@ app.post("/favorites/add", authMiddleware, async (req, res) => {
   }
 });
 
-app.post("/favorites/remove", authMiddleware, async (req, res) => {
+app.post("/favorites/remove", async (req, res) => {
   try {
-    const { placeId } = req.body;
-    const userId = req.user.uid;
+    const { userId, placeId } = req.body;
 
     if (!placeId) {
       return res.status(400).json({ error: "Missing placeId" });
@@ -639,9 +682,9 @@ app.post("/favorites/remove", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/favorites", authMiddleware, async (req, res) => {
+app.get("/favorites", async (req, res) => {
   try {
-    const userId = req.user.uid;
+    const { userId } = req.query;
 
     const snap = await db.collection("favorites").doc(userId).get();
 
@@ -761,7 +804,7 @@ app.get("/favorites/:userId", async (req, res) => {
 app.post("/notifications/send", async (req, res) => {
   try {
     const { fromUserId, toUserId, teamId, teamName } = req.body;
-
+    console.log("/notifications/send", fromUserId, toUserId, teamId, teamName);
     if (!fromUserId || !toUserId || !teamId) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
@@ -790,7 +833,7 @@ app.post("/notifications/send", async (req, res) => {
 app.get("/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-
+    console.log("/notifications/:userId", userId);
     const snap = await db
       .collection("notifications")
       .where("toUserId", "==", userId)
@@ -811,7 +854,7 @@ app.get("/notifications/:userId", async (req, res) => {
 app.post("/notifications/accept", async (req, res) => {
   try {
     const { notifId, userId } = req.body;
-
+    console.log("/notifications/accept", notifId, userId);
     if (!notifId || !userId)
       return res.status(400).json({ error: "MISSING_FIELDS" });
 
@@ -852,7 +895,7 @@ app.post("/notifications/accept", async (req, res) => {
 app.post("/notifications/reject", async (req, res) => {
   try {
     const { notifId } = req.body;
-
+    console.log("/notifications/reject", notifId);
     if (!notifId) return res.status(400).json({ error: "MISSING_FIELDS" });
 
     await db.collection("notifications").doc(notifId).delete();
