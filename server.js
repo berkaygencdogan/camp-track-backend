@@ -481,19 +481,21 @@ app.get("/places/new", async (req, res) => {
 app.post("/places/add", async (req, res) => {
   try {
     const { userId, name, city, description, photos, location } = req.body;
-
+    // --- VALIDATION ---
     if (
       !userId ||
       !name ||
       !city ||
       !photos ||
+      !Array.isArray(photos) ||
+      photos.length === 0 ||
       !location?.latitude ||
       !location?.longitude
     ) {
       return res.status(400).json({ error: "MISSING_FIELDS" });
     }
 
-    // Kullanıcıyı getir
+    // --- USER CHECK ---
     const userSnap = await db.collection("users").doc(userId).get();
 
     if (!userSnap.exists) {
@@ -502,17 +504,17 @@ app.post("/places/add", async (req, res) => {
 
     const user = userSnap.data();
 
-    // ADMIN Mİ NORMAL USER MI?
+    // --- ADMIN / USER ---
     const addedBy = user.role === "admin" ? "admin" : userId;
 
-    // Firestore’a kaydet
+    // --- SAVE PLACE ---
     const placeRef = await db.collection("places").add({
       name,
       city,
       description: description || "",
-      photos,
-      addedBy,
+      photos, // Array of base64 strings or URLs
       createdAt: Date.now(),
+      addedBy,
       latitude: location.latitude,
       longitude: location.longitude,
     });
@@ -523,7 +525,7 @@ app.post("/places/add", async (req, res) => {
       addedBy,
     });
   } catch (err) {
-    console.log("PLACE_ADD_ERROR:", err);
+    console.log("❌ PLACE_ADD_ERROR:", err);
     return res.status(500).json({ error: "PLACE_ADD_FAILED" });
   }
 });
@@ -737,8 +739,6 @@ app.post("/favorites/add", async (req, res) => {
   try {
     const { userId, placeId } = req.body;
 
-    console.log(userId, placeId);
-
     if (!placeId) {
       return res.status(400).json({ error: "Missing placeId" });
     }
@@ -888,7 +888,6 @@ app.post("/notifications/send", async (req, res) => {
 app.get("/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    console.log("/notifications/:userId", userId);
     const snap = await db
       .collection("notifications")
       .where("toUserId", "==", userId)
@@ -909,7 +908,6 @@ app.get("/notifications/:userId", async (req, res) => {
 app.post("/notifications/accept", async (req, res) => {
   try {
     const { notifId, userId } = req.body;
-    console.log("/notifications/accept", notifId, userId);
     if (!notifId || !userId)
       return res.status(400).json({ error: "MISSING_FIELDS" });
 
