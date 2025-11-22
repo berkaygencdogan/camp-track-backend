@@ -27,7 +27,7 @@ function authMiddleware(req, res, next) {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // { uid, email }
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: "INVALID_TOKEN" });
@@ -478,6 +478,98 @@ app.get("/places/new", async (req, res) => {
   }
 });
 
+app.post("/places/add", async (req, res) => {
+  try {
+    const { userId, name, city, description, photos, location } = req.body;
+
+    if (
+      !userId ||
+      !name ||
+      !city ||
+      !photos ||
+      !location?.latitude ||
+      !location?.longitude
+    ) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // Kullanıcıyı getir
+    const userSnap = await db.collection("users").doc(userId).get();
+
+    if (!userSnap.exists) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const user = userSnap.data();
+
+    // ADMIN Mİ NORMAL USER MI?
+    const addedBy = user.role === "admin" ? "admin" : userId;
+
+    // Firestore’a kaydet
+    const placeRef = await db.collection("places").add({
+      name,
+      city,
+      description: description || "",
+      photos,
+      addedBy,
+      createdAt: Date.now(),
+      latitude: location.latitude,
+      longitude: location.longitude,
+    });
+
+    return res.json({
+      success: true,
+      id: placeRef.id,
+      addedBy,
+    });
+  } catch (err) {
+    console.log("PLACE_ADD_ERROR:", err);
+    return res.status(500).json({ error: "PLACE_ADD_FAILED" });
+  }
+});
+
+app.get("/places/user/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Kullanıcıyı çek
+    const userSnap = await db.collection("users").doc(userId).get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ error: "USER_NOT_FOUND" });
+    }
+
+    const user = userSnap.data();
+
+    let snap;
+
+    if (user.role === "admin") {
+      // Adminse → addedBy == "admin" olanları getir
+      snap = await db
+        .collection("places")
+        .where("addedBy", "==", "admin")
+        .orderBy("createdAt", "desc")
+        .get();
+    } else {
+      // Normal kullanıcıysa → addedBy == userId
+      snap = await db
+        .collection("places")
+        .where("addedBy", "==", userId)
+        .orderBy("createdAt", "desc")
+        .get();
+    }
+
+    const places = snap.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    return res.json({ places });
+  } catch (err) {
+    console.log("USER_PLACES_ERROR:", err);
+    res.status(500).json({ error: "USER_PLACES_FAILED" });
+  }
+});
+
 app.get("/places/popular", async (req, res) => {
   try {
     const snap = await db
@@ -500,6 +592,7 @@ app.get("/places/popular", async (req, res) => {
 app.get("/places/:id", authOptional, async (req, res) => {
   try {
     const { id } = req.params;
+    const { userId } = req.query; // ← USERİD BURADA GELİYOR
 
     const snap = await db.collection("places").doc(id).get();
     if (!snap.exists) {
@@ -508,9 +601,10 @@ app.get("/places/:id", authOptional, async (req, res) => {
 
     const place = { id: snap.id, ...snap.data() };
 
-    // favori kontrolü (kullanıcı giriş yaptıysa)
-    if (req.user?.uid) {
-      const favSnap = await db.collection("favorites").doc(req.user.uid).get();
+    // Eğer userId varsa favori kontrolünü yap
+
+    if (userId) {
+      const favSnap = await db.collection("favorites").doc(userId).get();
       const isFav = favSnap.exists && favSnap.data()[id] === true;
       place.isFavorite = isFav;
     } else {
@@ -577,6 +671,7 @@ app.post("/register", async (req, res) => {
         phone,
         image: `https://ui-avatars.com/api/?name=${name}`,
         createdAt: Date.now(),
+        role: "user",
       });
 
     return res.json({ success: true });
@@ -738,46 +833,6 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
 
 // --------------------------------------------------------
 // FAVORİ EKLE
-// --------------------------------------------------------
-app.post("/favorites/add", async (req, res) => {
-  try {
-    const { userId, placeId } = req.body;
-
-    const placeRef = db.collection("places").doc(placeId);
-
-    await placeRef.update({
-      favoritedBy: admin.firestore.FieldValue.arrayUnion(userId),
-    });
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("FAVORITE ADD ERROR:", err);
-    return res.status(500).json({ error: "FAVORITE_ADD_FAILED" });
-  }
-});
-
-// --------------------------------------------------------
-// FAVORİ ÇIKAR
-// --------------------------------------------------------
-app.post("/favorites/remove", async (req, res) => {
-  try {
-    const { userId, placeId } = req.body;
-
-    const placeRef = db.collection("places").doc(placeId);
-
-    await placeRef.update({
-      favoritedBy: admin.firestore.FieldValue.arrayRemove(userId),
-    });
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("FAVORITE REMOVE ERROR:", err);
-    return res.status(500).json({ error: "FAVORITE_REMOVE_FAILED" });
-  }
-});
-
-// --------------------------------------------------------
-// GET USER FAVORITES
 // --------------------------------------------------------
 app.get("/favorites/:userId", async (req, res) => {
   try {
