@@ -960,6 +960,81 @@ app.post("/notifications/reject", async (req, res) => {
   }
 });
 
+app.get("/backpack/:userId", async (req, res) => {
+  const { userId } = req.params;
+  console.log(userId);
+  try {
+    const ref = db.collection("backpacks").doc(userId);
+    const snap = await ref.get();
+
+    if (!snap.exists) {
+      return res.json({ items: [] });
+    }
+
+    return res.json({ items: snap.data().items || [] });
+  } catch (err) {
+    console.log("BACKPACK_GET_ERROR:", err);
+    res.status(500).json({ error: "BACKPACK_GET_FAILED" });
+  }
+});
+
+app.post("/backpack/add", async (req, res) => {
+  const { userId, item } = req.body;
+  console.log("add", userId, item);
+  if (!userId || !item?.id) {
+    return res.status(400).json({ error: "MISSING_FIELDS" });
+  }
+
+  const ref = db.collection("backpacks").doc(userId);
+
+  try {
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+
+      const current = snap.exists ? snap.data().items || [] : [];
+
+      // Eğer aynı eşya varsa tekrar ekleme
+      if (!current.some((i) => i.id === item.id)) {
+        current.push(item);
+      }
+
+      t.set(ref, { items: current }, { merge: true });
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.log("BACKPACK_ADD_ERROR:", err);
+    res.status(500).json({ error: "BACKPACK_ADD_FAILED" });
+  }
+});
+
+app.post("/backpack/remove", async (req, res) => {
+  const { userId, itemId } = req.body;
+  console.log("remove", userId, itemId);
+  if (!userId || !itemId) {
+    return res.status(400).json({ error: "MISSING_FIELDS" });
+  }
+
+  const ref = db.collection("backpacks").doc(userId);
+
+  try {
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      if (!snap.exists) return;
+
+      const current = snap.data().items || [];
+      const updated = current.filter((i) => i.id !== itemId);
+
+      t.set(ref, { items: updated }, { merge: true });
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.log("BACKPACK_REMOVE_ERROR:", err);
+    res.status(500).json({ error: "BACKPACK_REMOVE_FAILED" });
+  }
+});
+
 // --------------------------------------------------
 // START SERVER
 // --------------------------------------------------
