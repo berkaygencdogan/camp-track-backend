@@ -4,6 +4,8 @@ const admin = require("firebase-admin");
 const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
 const { v4: uuidv4 } = require("uuid");
+const { getStorage } = require("firebase-admin/storage");
+const multer = require("multer");
 
 dotenv.config();
 
@@ -85,14 +87,19 @@ async function checkAdmin(req, res, next) {
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "NO_TOKEN" });
+
+  if (!authHeader) {
+    return res.status(401).json({ error: "NO_TOKEN" });
+  }
 
   const token = authHeader.split(" ")[1];
+
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (err) {
+    console.log("JWT ERROR:", err);
     return res.status(401).json({ error: "INVALID_TOKEN" });
   }
 }
@@ -179,6 +186,128 @@ const generateKeywords = (name) => {
   }
   return keys;
 };
+
+app.post("/uploadImage", async (req, res) => {
+  try {
+    const { imageBase64, userId } = req.body;
+
+    console.log(imageBase64, userId);
+    if (!imageBase64) {
+      return res.status(400).json({ success: false, message: "No image" });
+    }
+
+    const buffer = Buffer.from(imageBase64, "base64");
+    const fileName = `uploads/${userId}_${Date.now()}.jpg`;
+
+    const bucket = admin.storage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
+    const file = bucket.file(fileName);
+
+    await file.save(buffer, {
+      metadata: { contentType: "image/jpeg" },
+    });
+
+    const url = await file.getSignedUrl({
+      action: "read",
+      expires: "03-01-2099",
+    });
+
+    res.json({ success: true, url: url[0] });
+  } catch (err) {
+    console.log("UPLOAD IMAGE ERROR:", err);
+    res.status(500).json({ success: false });
+  }
+});
+
+app.post("/uploadMedia", async (req, res) => {
+  try {
+    const { base64, userId, isVideo } = req.body;
+
+    if (!base64) {
+      return res.status(400).json({ error: "Missing base64" });
+    }
+
+    const buffer = Buffer.from(base64, "base64");
+    const bucket = admin.storage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
+    const fileName = `${userId}_${Date.now()}.${isVideo ? "mp4" : "jpg"}`;
+    const file = bucket.file(`uploads/${fileName}`);
+
+    await file.save(buffer, {
+      metadata: {
+        contentType: isVideo ? "video/mp4" : "image/jpeg",
+      },
+    });
+
+    const url = await file.getSignedUrl({
+      action: "read",
+      expires: "12-31-2099",
+    });
+
+    res.json({ url: url[0] });
+  } catch (err) {
+    console.log("MEDIA UPLOAD ERROR:", err);
+    res.status(500).json({ error: "Upload error" });
+  }
+});
+
+// Belleğe yükleyen storage
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post("/uploadMediaStream", upload.single("file"), async (req, res) => {
+  try {
+    const { userId, isVideo } = req.body;
+
+    if (!req.file) {
+      return res.status(400).json({ error: "No file received" });
+    }
+
+    const bucket = admin.storage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
+
+    const fileName = `${userId}_${Date.now()}.${
+      isVideo === "true" ? "mp4" : "jpg"
+    }`;
+    const file = bucket.file(`uploads/${fileName}`);
+
+    await file.save(req.file.buffer, {
+      metadata: {
+        contentType: isVideo === "true" ? "video/mp4" : "image/jpeg",
+      },
+    });
+
+    const url = await file.getSignedUrl({
+      action: "read",
+      expires: "12-31-2099",
+    });
+
+    res.json({ success: true, url: url[0] });
+  } catch (err) {
+    console.log("MEDIA STREAM UPLOAD ERROR:", err);
+    res.status(500).json({ error: "Upload error" });
+  }
+});
+
+// GET USER POSTS (GALLERY)
+app.get("/user/:userId/gallery", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const doc = await db.collection("posts").doc(userId).get();
+
+    if (!doc.exists) {
+      return res.json({ posts: [] });
+    }
+
+    const data = doc.data();
+    const posts = data.posts || [];
+
+    // En yeni en üstte
+    posts.sort((a, b) => b.createdAt - a.createdAt);
+
+    res.json({ posts });
+  } catch (err) {
+    console.log("GALLERY FETCH ERROR:", err);
+    res.status(500).json({ error: "Gallery fetch error" });
+  }
+});
 
 app.post("/teams/create", async (req, res) => {
   try {
@@ -577,6 +706,48 @@ app.get("/users/search", async (req, res) => {
   }
 });
 
+app.post("/user/update", async (req, res) => {
+  try {
+    const { userId, avatar, coverPhoto, nickname, bio } = req.body;
+
+    if (!userId) {
+      return res.json({ success: false, msg: "userId missing" });
+    }
+
+    const userRef = db.collection("users").doc(userId);
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+      return res.json({ success: false, msg: "User not found" });
+    }
+
+    // Güncellenecek alanlar
+    const updateData = {};
+
+    if (avatar !== undefined) updateData.avatar = avatar;
+    if (coverPhoto !== undefined) updateData.coverPhoto = coverPhoto;
+    if (nickname !== undefined) updateData.nickname = nickname;
+    if (bio !== undefined) updateData.bio = bio;
+
+    // Firestore güncelleme
+    await userRef.update(updateData);
+
+    // Güncellenmiş kullanıcı verisi
+    const updatedUser = (await userRef.get()).data();
+
+    return res.json({
+      success: true,
+      user: updatedUser,
+    });
+  } catch (err) {
+    console.log("USER UPDATE ERROR:", err);
+    return res.json({
+      success: false,
+      msg: "UPDATE_FAILED",
+    });
+  }
+});
+
 app.get("/places/search", async (req, res) => {
   const q = normalize(req.query.query || "");
 
@@ -873,8 +1044,9 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "INVALID_CREDENTIALS" });
     }
 
+    // 🔥 JWT artık id içeriyor!
     const token = jwt.sign(
-      { uid: data.localId, email },
+      { id: data.localId, email },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
     );
@@ -967,21 +1139,90 @@ app.get("/favorites", async (req, res) => {
   }
 });
 
+app.post("/post/comment", async (req, res) => {
+  try {
+    const { userId, ownerId, index, text } = req.body;
+
+    if (!userId || !ownerId || index === undefined || !text) {
+      return res.status(400).json({ success: false, msg: "MISSING_FIELDS" });
+    }
+
+    const userPostsRef = db.collection("posts").doc(ownerId);
+    const snap = await userPostsRef.get();
+
+    if (!snap.exists)
+      return res
+        .status(404)
+        .json({ success: false, msg: "User posts not found" });
+
+    const postsArray = snap.data().posts || [];
+
+    if (index < 0 || index >= postsArray.length) {
+      return res.status(400).json({ success: false, msg: "Invalid index" });
+    }
+
+    // Yorum atan kullanıcı
+    const userSnap = await db.collection("users").doc(userId).get();
+    const user = userSnap.data();
+
+    const commentId = Date.now().toString();
+    const newComment = {
+      id: commentId,
+      userId,
+      username: user.name || user.nickname || "Unknown",
+      userAvatar: user.avatar || "",
+      text,
+      createdAt: Date.now(),
+    };
+
+    // Yorumu ekle
+    postsArray[index].comments = postsArray[index].comments || [];
+    postsArray[index].comments.push(newComment);
+
+    await userPostsRef.update({ posts: postsArray });
+
+    // Bildirim
+    if (userId !== ownerId) {
+      const notifRef = db.collection("notifications").doc();
+
+      await notifRef.set({
+        id: notifRef.id,
+        type: "comment",
+        fromUserId: userId,
+        toUserId: ownerId,
+        createdAt: Date.now(),
+        read: false,
+        text: `${user.nickname} gönderine yorum yaptı: "${text}"`,
+        postOwnerId: ownerId,
+        postIndex: index,
+        commentId, // 🔥 BURADA
+      });
+    }
+
+    return res.json({ success: true, comment: newComment });
+  } catch (err) {
+    console.log("COMMENT ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
 // --------------------------------------------------
 // TEST PROTECTED ROUTE
 // --------------------------------------------------
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
-    const userSnap = await db.collection("users").doc(req.user.uid).get();
+    const userSnap = await db.collection("users").doc(req.user.id).get();
 
     if (!userSnap.exists) {
       return res.status(404).json({ error: "USER_NOT_FOUND" });
     }
 
     return res.json({
+      success: true,
       user: userSnap.data(),
     });
   } catch (err) {
+    console.log("AUTH_ME_ERROR:", err);
     return res.status(500).json({ error: "AUTH_FAILED" });
   }
 });
@@ -1055,13 +1296,13 @@ app.get("/notifications/:userId", async (req, res) => {
     for (const doc of notifSnap.docs) {
       const data = doc.data();
 
-      // Gönderen kişinin avatar + isim
       const sender = await db.collection("users").doc(data.fromUserId).get();
       const senderInfo = sender.exists ? sender.data() : {};
 
       notifications.push({
         ...data,
-        fromName: senderInfo.name || "",
+        id: doc.id,
+        fromName: senderInfo.nickname || senderInfo.name || "Unknown",
         fromAvatar: senderInfo.avatar || "",
       });
     }
@@ -1161,6 +1402,23 @@ app.post("/notifications/reject", async (req, res) => {
   } catch (err) {
     console.log("REJECT ERROR:", err);
     return res.json({ success: false });
+  }
+});
+app.post("/notifications/delete", async (req, res) => {
+  try {
+    const { notifId } = req.body;
+
+    if (!notifId || typeof notifId !== "string" || notifId.trim() === "") {
+      console.log("DELETE_ERROR: notifId invalid =>", notifId);
+      return res.status(400).json({ success: false, msg: "INVALID_ID" });
+    }
+
+    await db.collection("notifications").doc(notifId).delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("DELETE ERROR:", err);
+    return res.status(500).json({ success: false });
   }
 });
 
@@ -1893,6 +2151,315 @@ app.post("/visits/addOrUpdate", async (req, res) => {
   } catch (err) {
     console.log("VISIT ADD/UPDATE ERROR:", err);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/post/new", async (req, res) => {
+  try {
+    const { userId, caption, medias } = req.body; // 🔥 multiple medias
+
+    if (!userId || !medias || medias.length === 0) {
+      return res.status(400).json({ error: "Missing media" });
+    }
+
+    const userRef = db.collection("posts").doc(userId);
+    const userDoc = await userRef.get();
+    const userData = (await db.collection("users").doc(userId).get()).data();
+
+    const newPost = {
+      id: Date.now().toString(),
+      userId,
+      username: userData.name || "",
+      userAvatar: userData.image || null,
+      caption: caption || "",
+      medias, // 🔥 array of media
+      createdAt: Date.now(),
+    };
+
+    if (!userDoc.exists) {
+      await userRef.set({ posts: [newPost] });
+    } else {
+      await userRef.update({
+        posts: admin.firestore.FieldValue.arrayUnion(newPost),
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("POST NEW ERROR:", err);
+    return res.status(500).json({ error: "Post create error" });
+  }
+});
+
+app.get("/posts/user/:id", async (req, res) => {
+  try {
+    const postsSnap = await db
+      .collection("posts")
+      .doc(userId)
+      .collection("items")
+      .orderBy("createdAt", "desc")
+      .get();
+
+    const posts = postsSnap.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    return res.json({ success: true, posts });
+  } catch (err) {
+    console.log("USER POSTS ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// =======================================================
+// GET /post/:postId → Tek post detay
+// =======================================================
+app.get("/post/:postId", async (req, res) => {
+  try {
+    const doc = await db.collection("posts").doc(req.params.postId).get();
+    if (!doc.exists) return res.json({ success: false, message: "Bulunamadı" });
+
+    return res.json({ success: true, post: { id: doc.id, ...doc.data() } });
+  } catch (err) {
+    console.log("POST DETAIL ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.delete("/post/:postId/delete", async (req, res) => {
+  try {
+    await db.collection("posts").doc(req.params.postId).delete();
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("POST DELETE ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.put("/post/:postId/edit", async (req, res) => {
+  try {
+    const { caption, medias } = req.body; // 🔥 caption + medias
+    const postId = req.params.postId;
+
+    if (!caption && !medias) {
+      return res.status(400).json({ error: "Nothing to update" });
+    }
+
+    // Kullanıcı ID’sini bilmiyoruz → frontend query içinde owner gönderiyor
+    const owner = req.query.owner;
+    if (!owner) {
+      return res.status(400).json({ error: "Owner missing" });
+    }
+
+    const postsRef = db.collection("posts").doc(owner);
+    const doc = await postsRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "User posts not found" });
+    }
+
+    const data = doc.data();
+    const posts = data.posts || [];
+
+    // Hedef postu bul
+    const index = posts.findIndex((p) => p.id == postId);
+    if (index === -1) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    // Güncelle
+    if (caption !== undefined) posts[index].caption = caption;
+    if (medias !== undefined) posts[index].medias = medias; // 🔥 medya güncelleme
+
+    posts[index].updatedAt = Date.now();
+
+    // Firestore'a kaydet
+    await postsRef.update({ posts });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("POST EDIT ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.delete("/post/:postId/media", async (req, res) => {
+  try {
+    const { postId } = req.params;
+    const { owner, url } = req.body;
+
+    if (!owner || !url) {
+      return res.status(400).json({ error: "Missing owner or url" });
+    }
+
+    const postsRef = db.collection("posts").doc(owner);
+    const doc = await postsRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "User posts not found" });
+    }
+
+    const posts = doc.data().posts || [];
+
+    const index = posts.findIndex((p) => p.id == postId);
+    if (index === -1) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    // ❌ istenen medyayı array'den sil
+    posts[index].medias = posts[index].medias.filter((m) => m.url !== url);
+    posts[index].updatedAt = Date.now();
+
+    await postsRef.update({ posts });
+
+    return res.json({ success: true, medias: posts[index].medias });
+  } catch (err) {
+    console.log("DELETE MEDIA ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+// =======================================================
+// POST /post/:postId/comment → Yoruma ekleme
+// =======================================================
+app.post("/post/:postId/comment", async (req, res) => {
+  try {
+    const { userId, text } = req.body;
+
+    if (!userId || !text) return res.status(400).json({ success: false });
+
+    const ref = await db
+      .collection("posts")
+      .doc(req.params.postId)
+      .collection("comments")
+      .add({
+        userId,
+        text,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+    return res.json({ success: true, commentId: ref.id });
+  } catch (err) {
+    console.log("COMMENT ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.get("/post/:postId/comments", async (req, res) => {
+  try {
+    const snapshot = await db
+      .collection("posts")
+      .doc(req.params.postId)
+      .collection("comments")
+      .orderBy("createdAt", "asc")
+      .get();
+
+    const comments = snapshot.docs.map((d) => ({
+      id: d.id,
+      ...d.data(),
+    }));
+
+    return res.json({ success: true, comments });
+  } catch (err) {
+    console.log("COMMENT LIST ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.delete("/post/:postId/comment/:commentId/delete", async (req, res) => {
+  try {
+    await db
+      .collection("posts")
+      .doc(req.params.postId)
+      .collection("comments")
+      .doc(req.params.commentId)
+      .delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("COMMENT DELETE ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.post("/post/:postId/like", async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const ref = db.collection("posts").doc(req.params.postId);
+    const doc = await ref.get();
+
+    if (!doc.exists) return res.json({ success: false });
+
+    const data = doc.data();
+    let likedBy = data.likedBy || [];
+
+    if (likedBy.includes(userId)) {
+      likedBy = likedBy.filter((id) => id !== userId);
+    } else {
+      likedBy.push(userId);
+    }
+
+    await ref.update({ likedBy, likes: likedBy.length });
+
+    return res.json({ success: true, likedBy, likes: likedBy.length });
+  } catch (err) {
+    console.log("LIKE ERROR:", err);
+    return res.status(500).json({ success: false });
+  }
+});
+
+app.get("/user/:id", async (req, res) => {
+  try {
+    const userRef = db.collection("users").doc(req.params.id);
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+      return res.status(404).json({ success: false, msg: "User not found" });
+    }
+
+    const user = userSnap.data();
+
+    // GALLERY
+    const gallerySnap = await db
+      .collection("posts")
+      .where("userId", "==", req.params.id)
+      .get();
+
+    const posts = gallerySnap.docs.map((d) => d.data());
+
+    // ADDED PLACES
+    const addedSnap = await db
+      .collection("places")
+      .where("userId", "==", req.params.id)
+      .get();
+
+    const addedPlaces = addedSnap.docs.map((d) => ({
+      id: d.id,
+      ...d.data(),
+    }));
+
+    // FAVORITES
+    const favSnap = await db.collection("favorites").doc(req.params.id).get();
+
+    const favorites = favSnap.exists ? favSnap.data().items || [] : [];
+
+    // VISITED
+    const visitSnap = await db.collection("visited").doc(req.params.id).get();
+
+    const visited = visitSnap.exists ? visitSnap.data().items || [] : [];
+
+    return res.json({
+      success: true,
+      user: user, // 🔥 TAM KULLANICI DATASI
+      posts,
+      addedPlaces,
+      favorites,
+      visited,
+    });
+  } catch (err) {
+    console.log("USER FETCH ERROR:", err);
+    return res.status(500).json({ success: false });
   }
 });
 
