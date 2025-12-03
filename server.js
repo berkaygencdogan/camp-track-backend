@@ -549,17 +549,31 @@ app.post("/user/update", async (req, res) => {
 });
 
 app.get("/places/search", async (req, res) => {
-  const q = normalize(req.query.query || "");
+  try {
+    let q = (req.query.query || "").trim().toLowerCase();
+    if (!q) return res.json({ places: [] });
 
-  const snap = await db.collection("places").get();
+    // Kullanıcı 1 kelime değil 2-3 kelime yazabilir → hepsini al
+    const terms = q.split(" ").filter(Boolean);
 
-  const results = snap.docs
-    .map((d) => ({ id: d.id, ...d.data() }))
-    .filter(
-      (p) => normalize(p.name).includes(q) || normalize(p.city).includes(q)
-    );
+    const snap = await db.collection("places").get();
+    const allPlaces = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 
-  res.json({ places: results });
+    const results = allPlaces.filter((p) => {
+      const name = p.name?.toLowerCase() || "";
+      const city = p.city?.toLowerCase() || "";
+
+      // Kullanıcının yazdığı her kelime eşleşmek zorunda
+      return terms.every((word) => {
+        return name.includes(word) || city.includes(word);
+      });
+    });
+
+    res.json({ places: results });
+  } catch (err) {
+    console.log("PLACE SEARCH ERROR:", err);
+    res.status(500).json({ places: [] });
+  }
 });
 
 app.get("/places/new", async (req, res) => {
