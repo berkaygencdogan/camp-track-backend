@@ -286,7 +286,6 @@ app.post("/uploadMediaStream", upload.single("file"), async (req, res) => {
   }
 });
 
-// GET USER POSTS (GALLERY)
 app.get("/user/:userId/gallery", async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -299,7 +298,41 @@ app.get("/user/:userId/gallery", async (req, res) => {
     const data = doc.data();
     const posts = data.posts || [];
 
-    // En yeni en üstte
+    // 🔥 Post sahibini 1 kez çek
+    const ownerSnap = await db.collection("users").doc(userId).get();
+    const owner = ownerSnap.exists ? ownerSnap.data() : {};
+
+    for (const post of posts) {
+      // 🔥 Post sahibinin avatar ve ismini ekle
+      post.userAvatar =
+        owner.avatar ||
+        `https://ui-avatars.com/api/?name=${owner.nickname || owner.name}`;
+      post.username = owner.nickname || owner.name || "Unknown";
+
+      // 🔥 Yorumları zenginleştir (avatar + username)
+      if (post.comments && post.comments.length > 0) {
+        const newComments = [];
+
+        for (const c of post.comments) {
+          const cUserSnap = await db.collection("users").doc(c.userId).get();
+          const cUser = cUserSnap.exists ? cUserSnap.data() : {};
+
+          newComments.push({
+            ...c,
+            username: cUser.nickname || cUser.name || "Unknown",
+            userAvatar:
+              cUser.avatar ||
+              `https://ui-avatars.com/api/?name=${
+                cUser.nickname || cUser.name
+              }`,
+          });
+        }
+
+        post.comments = newComments;
+      }
+    }
+
+    // 🆕 En yeni post en üstte
     posts.sort((a, b) => b.createdAt - a.createdAt);
 
     res.json({ posts });
@@ -366,120 +399,6 @@ app.post("/teams/create", async (req, res) => {
   }
 });
 
-// 3) USER INVITE (add member)
-app.post("/teams/invite", async (req, res) => {
-  try {
-    const { fromId, toId, teamId } = req.body;
-
-    if (!teamId || !fromId || !toId) {
-      return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
-
-    const teamSnap = await db.collection("teams").doc(toId).get();
-
-    if (!teamSnap.exists)
-      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
-
-    const team = teamSnap.data();
-
-    if (team.ownerId !== fromId)
-      return res.status(403).json({ error: "NO_PERMISSION" });
-
-    const fromUser = await db.collection("users").doc(fromId).get();
-    const toUser = await db.collection("users").doc(toId).get();
-
-    const requestId = Date.now().toString();
-
-    await db.collection("teamRequests").doc(requestId).set({
-      id: requestId,
-      teamId,
-      teamName: team.teamName,
-      fromId,
-      fromName: fromUser.data().name,
-      toId,
-      toName: toUser.data().name,
-      createdAt: Date.now(),
-    });
-
-    return res.json({ success: true, requestId });
-  } catch (err) {
-    console.log("INVITE_ERROR:", err);
-    res.status(500).json({ error: "INVITE_FAILED" });
-  }
-});
-
-app.get("/teams/requests", async (req, res) => {
-  try {
-    const { userId } = req.query;
-    if (!userId) return res.status(400).json({ error: "MISSING_USER_ID" });
-
-    const snap = await db
-      .collection("teamRequests")
-      .where("toId", "==", userId)
-      .get();
-
-    const requests = [];
-    snap.forEach((doc) => requests.push(doc.data()));
-
-    return res.json({ requests });
-  } catch (err) {
-    console.log("REQUEST_LIST_ERROR:", err);
-    return res.status(500).json({ error: "REQUEST_LIST_FAILED" });
-  }
-});
-
-app.post("/teams/request/reject", async (req, res) => {
-  try {
-    const { requestId } = req.body;
-    if (!requestId)
-      return res.status(400).json({ error: "MISSING_REQUEST_ID" });
-
-    const reqSnap = await db.collection("teamRequests").doc(requestId).get();
-    if (!reqSnap.exists)
-      return res.status(404).json({ error: "REQUEST_NOT_FOUND" });
-
-    await db.collection("teamRequests").doc(requestId).delete();
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("REQUEST_REJECT_ERROR:", err);
-    return res.status(500).json({ error: "REQUEST_REJECT_FAILED" });
-  }
-});
-
-app.post("/teams/requests/accept", async (req, res) => {
-  try {
-    const { requestId, teamId, userId } = req.body;
-
-    if (!requestId || !teamId || !userId) {
-      return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
-
-    // 1) Takıma kullanıcı ekle
-    await db
-      .collection("teams")
-      .doc(teamId)
-      .update({
-        members: admin.firestore.FieldValue.arrayUnion(userId),
-      });
-
-    // 2) Kullanıcının myTeams listesine ekle
-    await db
-      .collection("userTeams")
-      .doc(userId)
-      .set({ [teamId]: true }, { merge: true });
-
-    // 3) Request’i sil
-    await db.collection("teamRequests").doc(requestId).delete();
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("REQUEST_ACCEPT_ERROR:", err);
-    res.status(500).json({ error: "ACCEPT_FAILED" });
-  }
-});
-
-// 3) Kullanıcının tüm takımlarını listele
 app.get("/teams/my/:userId", async (req, res) => {
   try {
     const userId = req.params.userId;
@@ -536,7 +455,6 @@ app.get("/teams/:teamId", async (req, res) => {
   }
 });
 
-// TEAM MEMBERS – PUBLIC (token yok)
 app.get("/teams/:teamId/members", async (req, res) => {
   try {
     const { teamId } = req.params;
@@ -560,124 +478,6 @@ app.get("/teams/:teamId/members", async (req, res) => {
   } catch (err) {
     console.log("TEAM_MEMBERS_ERROR:", err);
     res.status(500).json({ error: "TEAM_MEMBERS_FAILED" });
-  }
-});
-
-// ADD MEMBER – Only owner can add (token yok → body üzerinden ownerId)
-app.post("/teams/addMember", async (req, res) => {
-  try {
-    const { teamId, userId, ownerId } = req.body;
-
-    if (!teamId || !userId || !ownerId) {
-      return res.status(400).json({ error: "MISSING_FIELDS" });
-    }
-
-    // Team getir
-    const teamSnap = await db.collection("teams").doc(teamId).get();
-    if (!teamSnap.exists)
-      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
-
-    const team = teamSnap.data();
-
-    // 🔥 SADECE takım sahibi ekleme yapabilir
-    if (team.ownerId !== ownerId)
-      return res.status(403).json({ error: "NO_PERMISSION" });
-
-    // Mevcut üyeler
-    const members = team.members || [];
-
-    // Zaten ekli mi?
-    if (!members.includes(userId)) {
-      members.push(userId);
-    }
-
-    // Firestore'a yaz
-    await db.collection("teams").doc(teamId).update({
-      members: members,
-    });
-
-    // Kullanıcıya da ekle
-    await db
-      .collection("userTeams")
-      .doc(userId)
-      .set({ [teamId]: true }, { merge: true });
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("ADD_MEMBER_ERROR:", err);
-    res.status(500).json({ error: "ADD_MEMBER_FAILED" });
-  }
-});
-
-// ---------------------------------------------------------
-// TAKIM ADINI DEĞİŞTİRME (YALNIZCA TAKIM SAHİBİ)
-// ---------------------------------------------------------
-app.post("/teams/rename", async (req, res) => {
-  try {
-    const userId = req.user.uid;
-    const { teamId, newName } = req.body;
-
-    const snap = await db.collection("teams").doc(teamId).get();
-    if (!snap.exists) return res.status(404).json({ error: "TEAM_NOT_FOUND" });
-
-    const team = snap.data();
-
-    // Yalnızca sahibi değiştirebilir
-    if (team.ownerId !== userId)
-      return res.status(403).json({ error: "NO_PERMISSION" });
-
-    await db.collection("teams").doc(teamId).update({
-      name: newName,
-    });
-
-    return res.json({ success: true, newName });
-  } catch (err) {
-    console.log("TEAM_RENAME_ERROR:", err);
-    res.status(500).json({ error: "TEAM_RENAME_FAILED" });
-  }
-});
-
-app.get("/teams/:teamId/members", async (req, res) => {
-  try {
-    const { teamId } = req.params;
-
-    const teamSnap = await db.collection("teams").doc(teamId).get();
-    if (!teamSnap.exists)
-      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
-
-    const team = teamSnap.data();
-    const members = team.members || [];
-
-    const userList = [];
-    for (let uid of members) {
-      const userSnap = await db.collection("users").doc(uid).get();
-      if (userSnap.exists) {
-        userList.push({ id: uid, ...userSnap.data() });
-      }
-    }
-
-    return res.json({ members: userList });
-  } catch (err) {
-    console.log("TEAM_MEMBERS_ERROR:", err);
-    res.status(500).json({ error: "TEAM_MEMBERS_FAILED" });
-  }
-});
-
-app.post("/users/setOnline", async (req, res) => {
-  try {
-    const { userId, isOnline } = req.body;
-
-    if (!userId) return res.status(400).json({ error: "NO_USER_ID" });
-
-    await db.collection("users").doc(userId).update({
-      isOnline,
-      lastSeen: Date.now(),
-    });
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("ONLINE_UPDATE_ERROR:", err);
-    res.status(500).json({ error: "ONLINE_UPDATE_FAILED" });
   }
 });
 
@@ -924,13 +724,6 @@ app.get("/places/:id", authOptional, async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// REGISTER USER
-// --------------------------------------------------
-
-// --------------------------------------------------
-// REGISTER USER (FINAL VERSION)
-// --------------------------------------------------
 app.post("/register", async (req, res) => {
   try {
     let { name, email, phone, password } = req.body;
@@ -1014,9 +807,6 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// LOGIN
-// --------------------------------------------------
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -1206,9 +996,6 @@ app.post("/post/comment", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// TEST PROTECTED ROUTE
-// --------------------------------------------------
 app.get("/auth/me", authMiddleware, async (req, res) => {
   try {
     const userSnap = await db.collection("users").doc(req.user.id).get();
@@ -1227,9 +1014,6 @@ app.get("/auth/me", authMiddleware, async (req, res) => {
   }
 });
 
-// --------------------------------------------------------
-// FAVORİ EKLE
-// --------------------------------------------------------
 app.get("/favorites/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1251,7 +1035,6 @@ app.get("/favorites/:userId", async (req, res) => {
   }
 });
 
-// 📌 Bir kullanıcıya davet gönder
 app.post("/notifications/send", async (req, res) => {
   try {
     const { fromUserId, toUserId, teamId, teamName } = req.body;
@@ -1280,7 +1063,6 @@ app.post("/notifications/send", async (req, res) => {
   }
 });
 
-// 📌 Bildirimleri listele
 app.get("/notifications/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -1314,7 +1096,6 @@ app.get("/notifications/:userId", async (req, res) => {
   }
 });
 
-// 📌 Daveti kabul et → kullanıcıyı takıma ekle
 app.post("/notifications/accept", async (req, res) => {
   try {
     const { notifId, userId } = req.body;
@@ -1365,45 +1146,6 @@ app.post("/notifications/accept", async (req, res) => {
   }
 });
 
-app.post("/notifications/reject", async (req, res) => {
-  try {
-    const { notifId } = req.body;
-
-    const notifRef = db.collection("notifications").doc(notifId);
-    const notifSnap = await notifRef.get();
-
-    if (!notifSnap.exists)
-      return res.json({ success: false, msg: "Notification not found" });
-
-    const notif = notifSnap.data();
-
-    // Takım bilgilerini çek
-    const teamRef = db.collection("teams").doc(notif.teamId);
-    const teamSnap = await teamRef.get();
-    const teamData = teamSnap.data();
-    const teamLogo = teamData.teamLogo || "";
-
-    // RED bildirimini oluştur
-    const newNotif = createNotification({
-      toUserId: notif.fromUserId, // → daveti atan
-      fromUserId: notif.toUserId, // → reddeden kişi
-      type: "team_invite_reject",
-      teamId: notif.teamId,
-      teamName: notif.teamName,
-      teamLogo,
-    });
-
-    await db.collection("notifications").doc(newNotif.id).set(newNotif);
-
-    // Eski daveti sil
-    await notifRef.delete();
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("REJECT ERROR:", err);
-    return res.json({ success: false });
-  }
-});
 app.post("/notifications/delete", async (req, res) => {
   try {
     const { notifId } = req.body;
@@ -1527,99 +1269,6 @@ app.post("/comments/add", async (req, res) => {
   res.json({ success: true, comment: newComment });
 });
 
-app.post("/comments/edit", async (req, res) => {
-  const { placeId, commentId, userId, newText } = req.body;
-
-  const placeRef = admin.firestore().collection("places").doc(placeId);
-  const snap = await placeRef.get();
-
-  if (!snap.exists) return res.json({ success: false });
-
-  const comments = snap.data().comments || [];
-
-  const updatedList = comments.map((item) =>
-    item.id === commentId && item.userId === userId
-      ? { ...item, comment: newText }
-      : item
-  );
-
-  await placeRef.update({ comments: updatedList });
-
-  res.json({ success: true });
-});
-
-app.post("/comments/delete", async (req, res) => {
-  const { placeId, commentId, userId } = req.body;
-
-  const placeRef = admin.firestore().collection("places").doc(placeId);
-  const snap = await placeRef.get();
-
-  if (!snap.exists) return res.json({ success: false });
-
-  const comments = snap.data().comments || [];
-
-  const filtered = comments.filter(
-    (item) => !(item.id === commentId && item.userId === userId)
-  );
-
-  await placeRef.update({ comments: filtered });
-
-  res.json({ success: true });
-});
-
-app.post("/comments/like", async (req, res) => {
-  const { placeId, commentId, userId } = req.body;
-
-  const placeRef = admin.firestore().collection("places").doc(placeId);
-  const snap = await placeRef.get();
-
-  const comments = snap.data().comments || [];
-
-  const updated = comments.map((item) => {
-    if (item.id !== commentId) return item;
-
-    const liked = item.likes.includes(userId);
-
-    return {
-      ...item,
-      likes: liked
-        ? item.likes.filter((u) => u !== userId)
-        : [...item.likes, userId],
-    };
-  });
-
-  await placeRef.update({ comments: updated });
-
-  res.json({ success: true });
-});
-
-app.post("/comments/reply", async (req, res) => {
-  const { placeId, parentId, userId, name, avatar, comment } = req.body;
-
-  const placeRef = admin.firestore().collection("places").doc(placeId);
-  const snap = await placeRef.get();
-  const comments = snap.data().comments || [];
-
-  const newReply = {
-    id: Date.now().toString(),
-    userId,
-    name,
-    avatar,
-    comment,
-    createdAt: Date.now(),
-  };
-
-  const updated = comments.map((item) =>
-    item.id === parentId
-      ? { ...item, replies: [...item.replies, newReply] }
-      : item
-  );
-
-  await placeRef.update({ comments: updated });
-
-  res.json({ success: true, reply: newReply });
-});
-
 app.get("/comments/:placeId", async (req, res) => {
   const placeId = req.params.placeId;
 
@@ -1633,7 +1282,6 @@ app.get("/comments/:placeId", async (req, res) => {
   res.json({ success: true, comments });
 });
 
-// 🔥 YORUM RAPOR ETME
 app.post("/comments/report", async (req, res) => {
   try {
     const {
@@ -1676,9 +1324,6 @@ app.post("/comments/report", async (req, res) => {
   }
 });
 
-// ------------------------------
-// ADMIN — USERS GET ALL
-// ------------------------------
 app.get("/admin/users/getAll", checkAdmin, async (req, res) => {
   try {
     const snap = await db.collection("users").get();
@@ -1691,9 +1336,6 @@ app.get("/admin/users/getAll", checkAdmin, async (req, res) => {
   }
 });
 
-// ------------------------------
-// ADMIN — USER DELETE
-// ------------------------------
 app.post("/admin/users/delete", checkAdmin, async (req, res) => {
   const { targetId } = req.body;
 
@@ -1709,9 +1351,6 @@ app.post("/admin/users/delete", checkAdmin, async (req, res) => {
   }
 });
 
-// ------------------------------
-// ADMIN — USER BAN
-// ------------------------------
 app.post("/admin/users/ban", checkAdmin, async (req, res) => {
   const { targetId, hours, banType } = req.body;
 
@@ -1768,27 +1407,6 @@ app.get("/admin/reports/getAll", checkAdmin, async (req, res) => {
   }
 });
 
-// ------------------------------
-// ADMIN — REPORT DELETE
-// ------------------------------
-app.post("/admin/reports/delete", checkAdmin, async (req, res) => {
-  const { reportId } = req.body;
-
-  if (!reportId)
-    return res.json({ success: false, error: "Rapor id gerekli." });
-
-  try {
-    await db.collection("reports").doc(reportId).delete();
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("delete report error:", err);
-    return res.status(500).json({ success: false });
-  }
-});
-
-// ------------------------------
-// ADMIN — COMMENT DELETE
-// ------------------------------
 app.post("/admin/comments/delete", checkAdmin, async (req, res) => {
   const { placeId, commentId, reportId } = req.body;
   console.log(placeId, commentId, reportId);
@@ -1829,9 +1447,7 @@ app.post("/admin/comments/delete", checkAdmin, async (req, res) => {
     return res.status(500).json({ success: false });
   }
 });
-// ------------------------------
-// ADMIN — GET ALL PLACES
-// ------------------------------
+
 app.get("/admin/places/getAll", checkAdmin, async (req, res) => {
   try {
     const snap = await db.collection("places").get();
@@ -1844,9 +1460,6 @@ app.get("/admin/places/getAll", checkAdmin, async (req, res) => {
   }
 });
 
-// ------------------------------
-// ADMIN — DELETE PLACE
-// ------------------------------
 app.post("/admin/places/delete", checkAdmin, async (req, res) => {
   const { placeId } = req.body;
 
@@ -1862,9 +1475,6 @@ app.post("/admin/places/delete", checkAdmin, async (req, res) => {
   }
 });
 
-// =========================
-//  ADMIN - GET DASHBOARD STATS
-// =========================
 app.get("/admin/stats", async (req, res) => {
   try {
     const { uid } = req.query;
@@ -1990,8 +1600,6 @@ app.get("/admin/stats", async (req, res) => {
   }
 });
 
-//VİSİT//
-
 app.get("/visited/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -2024,6 +1632,10 @@ app.post("/visits/detail", async (req, res) => {
 
         const data = snap.data();
 
+        // 🔥 place bilgisi alıyoruz
+        const placeSnap = await db.collection("places").doc(data.placeId).get();
+        const placeData = placeSnap.exists ? placeSnap.data() : null;
+
         // teammatesFull oluştur
         const teammatesFull = {};
         await Promise.all(
@@ -2038,6 +1650,11 @@ app.post("/visits/detail", async (req, res) => {
           ...data,
           teammatesFull: Object.values(teammatesFull),
           userMap: teammatesFull,
+
+          // 🔥 Yeni eklenen alan:
+          placePhotos: placeData?.photos || [],
+          placeName: placeData?.name || data.placeName,
+          city: placeData?.city || data.city,
         };
       })
     );
@@ -2048,32 +1665,6 @@ app.post("/visits/detail", async (req, res) => {
     return res
       .status(500)
       .json({ success: false, error: "Visits detail error" });
-  }
-});
-
-// DELETE VISIT (herkesten siler)
-app.post("/visits/delete", async (req, res) => {
-  try {
-    const { visitId } = req.body;
-
-    if (!visitId) return res.json({ success: false, error: "visitId gerekli" });
-
-    // 1) visits → komple sil
-    await db.collection("visits").doc(visitId).delete();
-
-    // 2) herkesin visitedPlaces listesinden kaldır
-    const allUsers = await db.collection("visitedPlaces").get();
-
-    for (let doc of allUsers.docs) {
-      await doc.ref.update({
-        [visitId]: admin.firestore.FieldValue.delete(),
-      });
-    }
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.log("VISIT DELETE ERROR:", err);
-    return res.status(500).json({ success: false });
   }
 });
 
@@ -2191,30 +1782,6 @@ app.post("/post/new", async (req, res) => {
   }
 });
 
-app.get("/posts/user/:id", async (req, res) => {
-  try {
-    const postsSnap = await db
-      .collection("posts")
-      .doc(userId)
-      .collection("items")
-      .orderBy("createdAt", "desc")
-      .get();
-
-    const posts = postsSnap.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    return res.json({ success: true, posts });
-  } catch (err) {
-    console.log("USER POSTS ERROR:", err);
-    return res.status(500).json({ success: false });
-  }
-});
-
-// =======================================================
-// GET /post/:postId → Tek post detay
-// =======================================================
 app.get("/post/:postId", async (req, res) => {
   try {
     const doc = await db.collection("posts").doc(req.params.postId).get();
@@ -2320,9 +1887,6 @@ app.delete("/post/:postId/media", async (req, res) => {
   }
 });
 
-// =======================================================
-// POST /post/:postId/comment → Yoruma ekleme
-// =======================================================
 app.post("/post/:postId/comment", async (req, res) => {
   try {
     const { userId, text } = req.body;
@@ -2463,9 +2027,6 @@ app.get("/user/:id", async (req, res) => {
   }
 });
 
-// --------------------------------------------------
-// START SERVER
-// --------------------------------------------------
 app.listen(process.env.PORT || 5000, () => {
   console.log("🔥 Backend running on port", process.env.PORT || 5000);
 });
