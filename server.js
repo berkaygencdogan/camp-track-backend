@@ -345,7 +345,7 @@ app.get("/user/:userId/gallery", async (req, res) => {
 app.post("/teams/create", async (req, res) => {
   try {
     const { teamName, logo, createdBy } = req.body;
-
+    console.log(teamName, logo, createdBy);
     if (!teamName || !createdBy) {
       return res.json({ success: false, error: "Eksik alanlar var." });
     }
@@ -396,6 +396,214 @@ app.post("/teams/create", async (req, res) => {
   } catch (err) {
     console.log("TEAM CREATE ERROR:", err);
     return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/teams/invite", async (req, res) => {
+  try {
+    const { fromId, toId, teamId } = req.body;
+
+    if (!teamId || !fromId || !toId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    const teamSnap = await db.collection("teams").doc(toId).get();
+
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+
+    if (team.ownerId !== fromId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
+
+    const fromUser = await db.collection("users").doc(fromId).get();
+    const toUser = await db.collection("users").doc(toId).get();
+
+    const requestId = Date.now().toString();
+
+    await db.collection("teamRequests").doc(requestId).set({
+      id: requestId,
+      teamId,
+      teamName: team.teamName,
+      fromId,
+      fromName: fromUser.data().name,
+      toId,
+      toName: toUser.data().name,
+      createdAt: Date.now(),
+    });
+
+    return res.json({ success: true, requestId });
+  } catch (err) {
+    console.log("INVITE_ERROR:", err);
+    res.status(500).json({ error: "INVITE_FAILED" });
+  }
+});
+
+app.get("/teams/requests", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "MISSING_USER_ID" });
+
+    const snap = await db
+      .collection("teamRequests")
+      .where("toId", "==", userId)
+      .get();
+
+    const requests = [];
+    snap.forEach((doc) => requests.push(doc.data()));
+
+    return res.json({ requests });
+  } catch (err) {
+    console.log("REQUEST_LIST_ERROR:", err);
+    return res.status(500).json({ error: "REQUEST_LIST_FAILED" });
+  }
+});
+
+app.post("/teams/request/reject", async (req, res) => {
+  try {
+    const { requestId } = req.body;
+    if (!requestId)
+      return res.status(400).json({ error: "MISSING_REQUEST_ID" });
+
+    const reqSnap = await db.collection("teamRequests").doc(requestId).get();
+    if (!reqSnap.exists)
+      return res.status(404).json({ error: "REQUEST_NOT_FOUND" });
+
+    await db.collection("teamRequests").doc(requestId).delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("REQUEST_REJECT_ERROR:", err);
+    return res.status(500).json({ error: "REQUEST_REJECT_FAILED" });
+  }
+});
+
+app.post("/teams/requests/accept", async (req, res) => {
+  try {
+    const { requestId, teamId, userId } = req.body;
+
+    if (!requestId || !teamId || !userId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // 1) Takıma kullanıcı ekle
+    await db
+      .collection("teams")
+      .doc(teamId)
+      .update({
+        members: admin.firestore.FieldValue.arrayUnion(userId),
+      });
+
+    // 2) Kullanıcının myTeams listesine ekle
+    await db
+      .collection("userTeams")
+      .doc(userId)
+      .set({ [teamId]: true }, { merge: true });
+
+    // 3) Request’i sil
+    await db.collection("teamRequests").doc(requestId).delete();
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("REQUEST_ACCEPT_ERROR:", err);
+    res.status(500).json({ error: "ACCEPT_FAILED" });
+  }
+});
+
+app.post("/teams/addMember", async (req, res) => {
+  try {
+    const { teamId, userId, ownerId } = req.body;
+
+    if (!teamId || !userId || !ownerId) {
+      return res.status(400).json({ error: "MISSING_FIELDS" });
+    }
+
+    // Team getir
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+
+    // 🔥 SADECE takım sahibi ekleme yapabilir
+    if (team.ownerId !== ownerId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
+
+    // Mevcut üyeler
+    const members = team.members || [];
+
+    // Zaten ekli mi?
+    if (!members.includes(userId)) {
+      members.push(userId);
+    }
+
+    // Firestore'a yaz
+    await db.collection("teams").doc(teamId).update({
+      members: members,
+    });
+
+    // Kullanıcıya da ekle
+    await db
+      .collection("userTeams")
+      .doc(userId)
+      .set({ [teamId]: true }, { merge: true });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.log("ADD_MEMBER_ERROR:", err);
+    res.status(500).json({ error: "ADD_MEMBER_FAILED" });
+  }
+});
+
+app.post("/teams/rename", async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { teamId, newName } = req.body;
+
+    const snap = await db.collection("teams").doc(teamId).get();
+    if (!snap.exists) return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = snap.data();
+
+    // Yalnızca sahibi değiştirebilir
+    if (team.ownerId !== userId)
+      return res.status(403).json({ error: "NO_PERMISSION" });
+
+    await db.collection("teams").doc(teamId).update({
+      name: newName,
+    });
+
+    return res.json({ success: true, newName });
+  } catch (err) {
+    console.log("TEAM_RENAME_ERROR:", err);
+    res.status(500).json({ error: "TEAM_RENAME_FAILED" });
+  }
+});
+
+app.get("/teams/:teamId/members", async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    const teamSnap = await db.collection("teams").doc(teamId).get();
+    if (!teamSnap.exists)
+      return res.status(404).json({ error: "TEAM_NOT_FOUND" });
+
+    const team = teamSnap.data();
+    const members = team.members || [];
+
+    const userList = [];
+    for (let uid of members) {
+      const userSnap = await db.collection("users").doc(uid).get();
+      if (userSnap.exists) {
+        userList.push({ id: uid, ...userSnap.data() });
+      }
+    }
+
+    return res.json({ members: userList });
+  } catch (err) {
+    console.log("TEAM_MEMBERS_ERROR:", err);
+    res.status(500).json({ error: "TEAM_MEMBERS_FAILED" });
   }
 });
 
