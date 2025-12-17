@@ -4,10 +4,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const jsonPath =
-  process.env.NODE_ENV === "production"
-    ? "/etc/secrets/serviceAccountKey.json"
-    : "./serviceAccountKey.json";
+const jsonPath = "./serviceAccountKey.json";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
